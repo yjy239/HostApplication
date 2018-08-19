@@ -46,6 +46,7 @@ public class MainActivity extends Activity {
                 if (this.checkSelfPermission(str) != PackageManager.PERMISSION_GRANTED) {
                     //申请权限
                     this.requestPermissions(permissions, REQUEST_CODE_CONTACT);
+
                     return;
                 }
             }

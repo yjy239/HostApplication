@@ -7,9 +7,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Message;
 import android.os.UserHandle;
+import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
 
@@ -21,6 +24,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.Map;
 
 /**
  * <pre>
@@ -40,21 +44,30 @@ public class HookManager {
     private static Class<?> packageParserClass;
     private static Object mPackageParser;
     private static Class<?> mActivityThreadClazz;
+    private static File apk;
 
     private static String PLUGIN = "com.yjy.pluginapplication.MainActivity";
     private static String REAL = "com.yjy.hostapplication.RealActivity";
+    private static String dirPath;
 
 
     public static void loadPlugin(Context context){
 
         try {
-            Utils.copyFileFromAssets(context,"plugin.apk",Utils.getDiskCacheDir(context)+File.separator +"plugin.apk");
-            File apk = new File(Utils.getDiskCacheDir(context),"plugin.apk");
+            dirPath = context.getCacheDir().getParentFile().getAbsolutePath()
+                    +File.separator+"Plugin"+File.separator+"data"+File.separator+"com.yjy.pluginapplication";
+
+            apk = new File(dirPath,"plugin.apk");
             if(apk.exists()){
                 Log.e("apk","exist");
             }else {
                 Log.e("apk","not exist");
+                Utils.copyFileFromAssets(context,"plugin.apk",
+                        dirPath+ File.separator +"plugin.apk");
+
             }
+
+
             cl = new PluginClassLoader(apk.getAbsolutePath(),
                     context.getDir("plugin.dex", 0).getAbsolutePath(),null,context.getClassLoader().getParent());
             hookPackageParser(apk);
@@ -221,7 +234,7 @@ public class HookManager {
         return 0;
     }
 
-    public static void hookGetPackageInfoNoCheck(Intent intent){
+    public static void hookGetPackageInfoNoCheck(Object mActivityClientRecordObj,Intent intent){
         //获取ActivityInfo
         try {
             Class<?> sPackageUserStateClass = Class.forName("android.content.pm.PackageUserState");
@@ -230,24 +243,17 @@ public class HookManager {
             Method generateActivityInfoMethod = packageParserClass.getDeclaredMethod("generateActivityInfo",sActivityClass,int.class,sPackageUserStateClass,int.class);
             ComponentName name = intent.getComponent();
             Log.e("ComponentName",name.getClassName());
-//            Object targetActivity = null;
-//            for(int i = 0;i<activities.size();i++){
-//                if(activities.get(i).toString().contains(name.getClassName())){
-//                    targetActivity = activities.get(i);
-//                    break;
-//                }
-//            }
-//
-//            if(targetActivity == null){
-//                return;
-//            }
+
             //获取activityInfo
+            //已经知道我们插件中的Activity信息只有一条，就没必要筛选了。作者本人懒了
             ActivityInfo activityInfo  = (ActivityInfo) generateActivityInfoMethod.invoke(mPackageParser,
                     activities.get(0),0,mPackageUserState, getCallingUserId());
 
             //有了activityInfo，再获取sDefaultCompatibilityInfo,调用getPackageInfoNoCheck方法
             Method getPackageInfoNoCheckMethod = mActivityThreadClazz.getDeclaredMethod("getPackageInfoNoCheck",ApplicationInfo.class,
                     CompatibilityInfoCompat.getMyClass());
+
+            fixApplicationInfo(activityInfo,apk);
 
             //获取到LoadApk实例
             Object LoadApk = getPackageInfoNoCheckMethod.invoke(sActivityThread,activityInfo.applicationInfo,CompatibilityInfoCompat.DEFAULT_COMPATIBILITY_INFO());
@@ -258,20 +264,25 @@ public class HookManager {
             mClassLoaderField.set(LoadApk,cl);
 
 
-            //把这个loadApk放到Map中
+            //把这个loadApk放到mPackages中
             Field LoadApkMapField = mActivityThreadClazz.getDeclaredField("mPackages");
             LoadApkMapField.setAccessible(true);
 
-            Object LoadApkMap = LoadApkMapField.get(sActivityThread);
+            Map LoadApkMap = (Map)LoadApkMapField.get(sActivityThread);
+
 
             //调用Map的put方法 mPackages.put(String,LoadApk)
-            Method putMethod = LoadApkMap.getClass().getDeclaredMethod("put",Object.class,Object.class);
+            LoadApkMap.put(activityInfo.applicationInfo.packageName,new WeakReference<Object>(LoadApk));
 
-            putMethod.invoke(LoadApkMap,activityInfo.applicationInfo.packageName,new WeakReference<Object>(LoadApk));
+
             //设置回去
             LoadApkMapField.set(sActivityThread,LoadApkMap);
 
-//            Thread.currentThread().setContextClassLoader(cl);
+            Field activityInfoField = mActivityClientRecordObj.getClass().getDeclaredField("activityInfo");
+            activityInfoField.setAccessible(true);
+            activityInfoField.set(mActivityClientRecordObj,activityInfo);
+
+            Thread.currentThread().setContextClassLoader(cl);
 
 
 
@@ -282,19 +293,115 @@ public class HookManager {
 
     }
 
+    private static void fixApplicationInfo(ActivityInfo activityInfo,File mPluginFile){
+        ApplicationInfo applicationInfo = activityInfo.applicationInfo;
+        if (applicationInfo.sourceDir == null) {
+            applicationInfo.sourceDir = mPluginFile.getPath();
+        }
+        if (applicationInfo.publicSourceDir == null) {
+            applicationInfo.publicSourceDir = mPluginFile.getPath();
+        }
+
+
+        if (applicationInfo.dataDir == null) {
+            String dirPath = context.getCacheDir().getParentFile().getAbsolutePath()
+                    +File.separator+"Plugin"+File.separator+"data"+File.separator+applicationInfo.packageName;
+            File dir = new File(dirPath);
+            if(!dir.exists()){
+                dir.mkdirs();
+            }
+
+            applicationInfo.dataDir = dirPath;
+        }
+
+        try {
+            Field scanDirField = applicationInfo.getClass().getDeclaredField("scanSourceDir");
+            scanDirField.setAccessible(true);
+            scanDirField.set(applicationInfo,applicationInfo.dataDir);
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                Field PublicSourceDirField = applicationInfo.getClass().getDeclaredField("scanPublicSourceDir");
+                PublicSourceDirField.setAccessible(true);
+                PublicSourceDirField.set(applicationInfo,applicationInfo.dataDir);
+            }
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+
+        try {
+            PackageInfo mHostPackageInfo = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
+            applicationInfo.uid = mHostPackageInfo.applicationInfo.uid;
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            if (applicationInfo.splitSourceDirs == null) {
+                applicationInfo.splitSourceDirs = new String[]{mPluginFile.getPath()};
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            if (applicationInfo.splitPublicSourceDirs == null) {
+                applicationInfo.splitPublicSourceDirs = new String[]{mPluginFile.getPath()};
+            }
+        }
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    if (Build.VERSION.SDK_INT < 26) {
+                        Field deviceEncryptedDirField = applicationInfo.getClass().getDeclaredField("deviceEncryptedDataDir");
+                        deviceEncryptedDirField.setAccessible(true);
+                        deviceEncryptedDirField.set(applicationInfo,applicationInfo.dataDir);
+
+
+                        Field credentialEncryptedDirField = applicationInfo.getClass().getDeclaredField("credentialEncryptedDataDir");
+                        credentialEncryptedDirField.setAccessible(true);
+                        credentialEncryptedDirField.set(applicationInfo,applicationInfo.dataDir);
+                    }
+
+                    Field deviceProtectedDirField = applicationInfo.getClass().getDeclaredField("deviceProtectedDataDir");
+                    deviceProtectedDirField.setAccessible(true);
+                    deviceProtectedDirField.set(applicationInfo,applicationInfo.dataDir);
+
+                    Field credentialProtectedDirField = applicationInfo.getClass().getDeclaredField("credentialProtectedDataDir");
+                    credentialProtectedDirField.setAccessible(true);
+                    credentialProtectedDirField.set(applicationInfo,applicationInfo.dataDir);
+
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+
+            if (TextUtils.isEmpty(applicationInfo.processName)) {
+                applicationInfo.processName = applicationInfo.packageName;
+            }
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+
+    }
+
     private static void handleLaunchActivity(Message msg) {
         try {
             //msg.obj ActivityClientRecord
-            Object obj = msg.obj;
-            Field intentField = obj.getClass().getDeclaredField("intent");
+            Object mActivityClientRecordObj = msg.obj;
+            Field intentField = mActivityClientRecordObj.getClass().getDeclaredField("intent");
             intentField.setAccessible(true);
-            Intent proxy = (Intent) intentField.get(obj);
+            Intent proxy = (Intent) intentField.get(mActivityClientRecordObj);
             Intent orgin = proxy.getParcelableExtra("realIntent");
             if(orgin != null){
-                intentField.set(obj,orgin);
+                intentField.set(mActivityClientRecordObj,orgin);
             }
             if(orgin != null){
-                hookGetPackageInfoNoCheck(orgin);
+                hookGetPackageInfoNoCheck(mActivityClientRecordObj,orgin);
             }
 
 

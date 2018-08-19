@@ -1,5 +1,7 @@
 package com.yjy.hostapplication;
 
+import android.util.Log;
+
 import dalvik.system.DexClassLoader;
 
 /**
@@ -14,5 +16,11 @@ import dalvik.system.DexClassLoader;
 public class PluginClassLoader extends DexClassLoader {
     public PluginClassLoader(String dexPath, String optimizedDirectory, String librarySearchPath, ClassLoader parent) {
         super(dexPath, optimizedDirectory, librarySearchPath, parent);
+    }
+
+    @Override
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+        Log.e("find","plugin");
+        return super.findClass(name);
     }
 }

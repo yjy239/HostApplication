@@ -18,5 +18,6 @@ public class App extends Application {
         HookManager.init(this);
         HookManager.loadPlugin(this);
         HookManager.hookLaunchActivity();
+
     }
 }
